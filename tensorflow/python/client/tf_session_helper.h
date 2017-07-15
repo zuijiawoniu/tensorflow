@@ -30,12 +30,6 @@ namespace tensorflow {
 // Container types for the various arguments and temporary values used
 // in the wrapper.
 
-// A FeedVector is a vector of tensor name and numpy array pairs. The
-// name is a borrowed C string.
-typedef tensorflow::gtl::InlinedVector<std::pair<const char*, PyArrayObject*>,
-                                       8>
-    FeedVector;
-
 // A NameVector is a vector of tensor or operation names, as borrowed
 // C strings.
 typedef tensorflow::gtl::InlinedVector<const char*, 8> NameVector;
@@ -43,18 +37,31 @@ typedef tensorflow::gtl::InlinedVector<const char*, 8> NameVector;
 // A PyObjectVector is a vector of borrowed pointers to PyObjects.
 typedef tensorflow::gtl::InlinedVector<PyObject*, 8> PyObjectVector;
 
-// Safe containers for (an) owned PyObject(s). On destruction, the
-// reference count of the contained object will be decremented.
+// A TF_TensorVector is a vector of borrowed pointers to TF_Tensors.
+typedef gtl::InlinedVector<TF_Tensor*, 8> TF_TensorVector;
+
+// Safe container for an owned PyObject. On destruction, the reference count of
+// the contained object will be decremented.
 inline void Py_DECREF_wrapper(PyObject* o) { Py_DECREF(o); }
+// Note: can't use decltype(&Py_DECREF_wrapper) due to SWIG
 typedef void (*Py_DECREF_wrapper_type)(PyObject*);
 typedef std::unique_ptr<PyObject, Py_DECREF_wrapper_type> Safe_PyObjectPtr;
-typedef std::vector<Safe_PyObjectPtr> Safe_PyObjectVector;
 Safe_PyObjectPtr make_safe(PyObject* o);
+
+// Safe containers for an owned TF_Tensor. On destruction, the tensor will be
+// deleted by TF_DeleteTensor.
+// Note: can't use decltype(&TF_DeleteTensor) due to SWIG
+typedef void (*TF_DeleteTensor_type)(TF_Tensor*);
+typedef std::unique_ptr<TF_Tensor, TF_DeleteTensor_type> Safe_TF_TensorPtr;
+Safe_TF_TensorPtr make_safe(TF_Tensor* tensor);
 
 // Run the graph associated with the session starting with the
 // supplied inputs[].  Regardless of success or failure, inputs[] are
 // stolen by the implementation (i.e. the implementation will
 // eventually call Py_DECREF on each array input).
+//
+// The PyObject* feed_dict must be a dictionary mapping strings to
+// NumPy arrays. This function does not modify its reference count.
 //
 // On success, the tensors corresponding to output_names[0,noutputs-1]
 // are placed in out_values[], and these outputs[] become the property
@@ -62,8 +69,8 @@ Safe_PyObjectPtr make_safe(PyObject* o);
 //
 // On failure, out_status contains a tensorflow::Status with an error
 // message.
-void TF_Run_wrapper(TF_Session* session, const TF_Buffer* run_options,
-                    const FeedVector& inputs, const NameVector& output_names,
+void TF_Run_wrapper(TF_DeprecatedSession* session, const TF_Buffer* run_options,
+                    PyObject* feed_dict, const NameVector& output_names,
                     const NameVector& target_nodes, TF_Status* out_status,
                     PyObjectVector* out_values, TF_Buffer* run_outputs);
 
@@ -74,9 +81,8 @@ void TF_Run_wrapper(TF_Session* session, const TF_Buffer* run_options,
 //
 // On failure, out_status contains a tensorflow::Status with an error
 // message.
-//
-// NOTE: This is EXPERIMENTAL and subject to change.
-void TF_PRunSetup_wrapper(TF_Session* session, const NameVector& input_names,
+void TF_PRunSetup_wrapper(TF_DeprecatedSession* session,
+                          const NameVector& input_names,
                           const NameVector& output_names,
                           const NameVector& target_nodes, TF_Status* out_status,
                           const char** out_handle);
@@ -84,16 +90,17 @@ void TF_PRunSetup_wrapper(TF_Session* session, const NameVector& input_names,
 // Continue to run the graph with additional feeds and fetches. The
 // execution state is uniquely identified by the handle.
 //
+// The PyObject* feed_dict must be a dictionary mapping strings to
+// NumPy arrays. This function does not modify its reference count.
+//
 // On success,  the tensors corresponding to output_names[0,noutputs-1]
 // are placed in out_values[], and these outputs[] become the property
 // of the caller (the caller must eventually call Py_DECREF on them).
 //
 // On failure,  out_status contains a tensorflow::Status with an error
 // message.
-//
-// NOTE: This is EXPERIMENTAL and subject to change.
-void TF_PRun_wrapper(TF_Session* session, const char* handle,
-                     const FeedVector& inputs, const NameVector& output_names,
+void TF_PRun_wrapper(TF_DeprecatedSession* session, const char* handle,
+                     PyObject* feed_dict, const NameVector& output_names,
                      TF_Status* out_status, PyObjectVector* out_values);
 
 // Wrapper for TF_Reset that converts the string vectors to character arrays.
@@ -104,6 +111,57 @@ void TF_Reset_wrapper(const TF_SessionOptions* opt,
 // Returns an explanation if a difference is found, or the empty string
 // for no difference.
 string EqualGraphDefWrapper(const string& actual, const string& expected);
+
+// Runs the graph associated with the session starting with the supplied inputs.
+// On success, `py_outputs` is populated with a numpy ndarray for each output
+// (the caller must decref these ndarrays, although this will likely be handled
+// by the Python gc). `session`, `out_status`, and `py_outputs` must be
+// non-null. `py_outputs` should be empty.
+void TF_SessionRun_wrapper(TF_Session* session, const TF_Buffer* run_options,
+                           const std::vector<TF_Output>& inputs,
+                           const std::vector<PyObject*>& input_ndarrays,
+                           const std::vector<TF_Output>& outputs,
+                           const std::vector<TF_Operation*>& targets,
+                           TF_Buffer* run_metadata, TF_Status* out_status,
+                           std::vector<PyObject*>* py_outputs);
+
+// Set up the graph with the intended feeds (inputs) and fetches (output) for
+// a sequence of partial run calls.
+//
+// On success, returns a handle that can be used for subsequent PRun calls. The
+// handle is owned by the caller and should be deleted with TF_DeletePRunHandle
+// when it is no longer needed.
+//
+// On failure, out_status contains a tensorflow::Status with an error
+// message.
+void TF_SessionPRunSetup_wrapper(TF_Session* session,
+                                 const std::vector<TF_Output>& inputs,
+                                 const std::vector<TF_Output>& outputs,
+                                 const std::vector<TF_Operation*>& targets,
+                                 const char** out_handle,
+                                 TF_Status* out_status);
+
+// Continue to run the graph with additional feeds and fetches. The
+// execution state is uniquely identified by the handle.
+//
+// On success, `py_outputs` is populated with a numpy ndarray for each output
+// (the caller must decref these ndarrays, although this will likely be handled
+// by the Python gc). `session`, `handle`, `out_status`, and `py_outputs` must
+// be non-null. `py_outputs` should be empty.
+//
+// On failure, out_status contains a tensorflow::Status with an error
+// message.
+void TF_SessionPRun_wrapper(TF_Session* session, const char* handle,
+                            const std::vector<TF_Output>& inputs,
+                            const std::vector<PyObject*>& input_ndarrays,
+                            const std::vector<TF_Output>& outputs,
+                            TF_Status* out_status,
+                            std::vector<PyObject*>* py_outputs);
+
+// Retrieves control inputs of this operation.
+// control_inputs should be empty.
+std::vector<TF_Operation*> TF_OperationGetControlInputs_wrapper(
+    TF_Operation* oper);
 
 }  // namespace tensorflow
 

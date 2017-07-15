@@ -19,61 +19,141 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
-import tensorflow as tf
 
 from tensorflow.contrib.distributions.python.ops import distribution_util
+from tensorflow.contrib.linalg.python.ops import linear_operator_diag
+from tensorflow.python.framework import constant_op
+from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import tensor_shape
+from tensorflow.python.ops import array_ops
+import tensorflow.python.ops.nn_grad  # pylint: disable=unused-import
+from tensorflow.python.platform import test
 
 
-class DistributionUtilTest(tf.test.TestCase):
+class ShapesFromLocAndScaleTest(test.TestCase):
 
-  def _np_rotate_transpose(self, x, shift):
-    if not isinstance(x, np.ndarray):
-      x = np.array(x)
-    return np.transpose(x, np.roll(np.arange(len(x.shape)), shift))
+  def test_static_loc_static_scale_non_matching_event_size_raises(self):
+    loc = constant_op.constant(np.zeros((2, 4)))
+    scale = linear_operator_diag.LinearOperatorDiag(np.ones((5, 1, 3)))
+    with self.assertRaisesRegexp(ValueError, "could not be broadcast"):
+      distribution_util.shapes_from_loc_and_scale(loc, scale)
 
-  def testRollStatic(self):
-    with self.test_session():
-      with self.assertRaisesRegexp(
-          ValueError, "None values not supported."):
-        distribution_util.rotate_transpose(None, 1)
-      for x in (np.ones(1), np.ones((2, 1)), np.ones((3, 2, 1))):
-        for shift in np.arange(-5, 5):
-          y = distribution_util.rotate_transpose(x, shift)
-          self.assertAllEqual(self._np_rotate_transpose(x, shift),
-                              y.eval())
-          self.assertAllEqual(np.roll(x.shape, shift),
-                              y.get_shape().as_list())
+  def test_static_loc_static_scale(self):
+    loc = constant_op.constant(np.zeros((2, 3)))
+    scale = linear_operator_diag.LinearOperatorDiag(np.ones((5, 1, 3)))
+    batch_shape, event_shape = distribution_util.shapes_from_loc_and_scale(
+        loc, scale)
 
-  def testRollDynamic(self):
+    self.assertEqual(tensor_shape.TensorShape([5, 2]), batch_shape)
+    self.assertEqual(tensor_shape.TensorShape([3]), event_shape)
+
+  def test_static_loc_dynamic_scale(self):
+    loc = constant_op.constant(np.zeros((2, 3)))
+    diag = array_ops.placeholder(dtypes.float64)
+    scale = linear_operator_diag.LinearOperatorDiag(diag)
     with self.test_session() as sess:
-      x = tf.placeholder(tf.float32)
-      shift = tf.placeholder(tf.int32)
-      for x_value in (np.ones(1, dtype=x.dtype.as_numpy_dtype()),
-                      np.ones((2, 1), dtype=x.dtype.as_numpy_dtype()),
-                      np.ones((3, 2, 1), dtype=x.dtype.as_numpy_dtype())):
-        for shift_value in np.arange(-5, 5):
-          self.assertAllEqual(
-              self._np_rotate_transpose(x_value, shift_value),
-              sess.run(distribution_util.rotate_transpose(x, shift),
-                       feed_dict={x: x_value, shift: shift_value}))
+      batch_shape, event_shape = sess.run(
+          distribution_util.shapes_from_loc_and_scale(loc, scale),
+          feed_dict={diag: np.ones((5, 1, 3))})
+      self.assertAllEqual([5, 2], batch_shape)
+      self.assertAllEqual([3], event_shape)
 
-  def testChooseVector(self):
+  def test_dynamic_loc_static_scale(self):
+    loc = array_ops.placeholder(dtypes.float64)
+    diag = constant_op.constant(np.ones((5, 2, 3)))
+    scale = linear_operator_diag.LinearOperatorDiag(diag)
     with self.test_session():
-      x = np.arange(10, 12)
-      y = np.arange(15, 18)
+      batch_shape, event_shape = distribution_util.shapes_from_loc_and_scale(
+          loc, scale)
+      # batch_shape depends on both args, and so is dynamic.  Since loc did not
+      # have static shape, we inferred event shape entirely from scale, and this
+      # is available statically.
       self.assertAllEqual(
-          x, distribution_util.pick_vector(
-              tf.less(0, 5), x, y).eval())
+          [5, 2], batch_shape.eval(feed_dict={loc: np.zeros((2, 3))}))
+      self.assertAllEqual([3], event_shape)
+
+  def test_dynamic_loc_dynamic_scale(self):
+    loc = array_ops.placeholder(dtypes.float64)
+    diag = array_ops.placeholder(dtypes.float64)
+    scale = linear_operator_diag.LinearOperatorDiag(diag)
+    with self.test_session() as sess:
+      batch_shape, event_shape = sess.run(
+          distribution_util.shapes_from_loc_and_scale(loc, scale),
+          feed_dict={diag: np.ones((5, 2, 3)), loc: np.zeros((2, 3))})
+      self.assertAllEqual([5, 2], batch_shape)
+      self.assertAllEqual([3], event_shape)
+
+  def test_none_loc_static_scale(self):
+    loc = None
+    scale = linear_operator_diag.LinearOperatorDiag(np.ones((5, 1, 3)))
+    batch_shape, event_shape = distribution_util.shapes_from_loc_and_scale(
+        loc, scale)
+
+    self.assertEqual(tensor_shape.TensorShape([5, 1]), batch_shape)
+    self.assertEqual(tensor_shape.TensorShape([3]), event_shape)
+
+  def test_none_loc_dynamic_scale(self):
+    loc = None
+    diag = array_ops.placeholder(dtypes.float64)
+    scale = linear_operator_diag.LinearOperatorDiag(diag)
+    with self.test_session() as sess:
+      batch_shape, event_shape = sess.run(
+          distribution_util.shapes_from_loc_and_scale(loc, scale),
+          feed_dict={diag: np.ones((5, 1, 3))})
+      self.assertAllEqual([5, 1], batch_shape)
+      self.assertAllEqual([3], event_shape)
+
+
+class TridiagTest(test.TestCase):
+
+  def testWorksCorrectlyNoBatches(self):
+    with self.test_session():
       self.assertAllEqual(
-          y, distribution_util.pick_vector(
-              tf.less(5, 0), x, y).eval())
-      self.assertAllEqual(
-          x, distribution_util.pick_vector(
-              tf.constant(True), x, y))  # No eval.
-      self.assertAllEqual(
-          y, distribution_util.pick_vector(
-              tf.constant(False), x, y))  # No eval.
+          [[4., 8., 0., 0.],
+           [1., 5., 9., 0.],
+           [0., 2., 6., 10.],
+           [0., 0., 3, 7.]],
+          distribution_util.tridiag(
+              [1., 2., 3.],
+              [4., 5., 6., 7.],
+              [8., 9., 10.]).eval())
+
+  def testWorksCorrectlyBatches(self):
+    with self.test_session():
+      self.assertAllClose(
+          [[[4., 8., 0., 0.],
+            [1., 5., 9., 0.],
+            [0., 2., 6., 10.],
+            [0., 0., 3, 7.]],
+           [[0.7, 0.1, 0.0, 0.0],
+            [0.8, 0.6, 0.2, 0.0],
+            [0.0, 0.9, 0.5, 0.3],
+            [0.0, 0.0, 1.0, 0.4]]],
+          distribution_util.tridiag(
+              [[1., 2., 3.],
+               [0.8, 0.9, 1.]],
+              [[4., 5., 6., 7.],
+               [0.7, 0.6, 0.5, 0.4]],
+              [[8., 9., 10.],
+               [0.1, 0.2, 0.3]]).eval(),
+          rtol=1e-5, atol=0.)
+
+  def testHandlesNone(self):
+    with self.test_session():
+      self.assertAllClose(
+          [[[4., 0., 0., 0.],
+            [0., 5., 0., 0.],
+            [0., 0., 6., 0.],
+            [0., 0., 0, 7.]],
+           [[0.7, 0.0, 0.0, 0.0],
+            [0.0, 0.6, 0.0, 0.0],
+            [0.0, 0.0, 0.5, 0.0],
+            [0.0, 0.0, 0.0, 0.4]]],
+          distribution_util.tridiag(
+              diag=[[4., 5., 6., 7.],
+                    [0.7, 0.6, 0.5, 0.4]]).eval(),
+          rtol=1e-5, atol=0.)
 
 
 if __name__ == "__main__":
-  tf.test.main()
+  test.main()

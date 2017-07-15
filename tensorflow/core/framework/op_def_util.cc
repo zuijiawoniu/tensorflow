@@ -18,6 +18,7 @@ limitations under the License.
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
+#include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/attr_value_util.h"
 #include "tensorflow/core/framework/op_def.pb_text.h"
 #include "tensorflow/core/framework/types.h"
@@ -60,7 +61,7 @@ Status AllowedTypeValue(DataType dt, const OpDef::AttrDef& attr) {
 
 Status AllowedStringValue(const string& str, const OpDef::AttrDef& attr) {
   const AttrValue& allowed_values(attr.allowed_values());
-  for (auto allowed : allowed_values.list().s()) {
+  for (const auto& allowed : allowed_values.list().s()) {
     if (str == allowed) {
       return Status::OK();
     }

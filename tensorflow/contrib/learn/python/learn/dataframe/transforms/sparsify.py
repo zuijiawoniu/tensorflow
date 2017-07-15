@@ -24,7 +24,7 @@ import numpy as np
 from tensorflow.contrib.learn.python.learn.dataframe import transform
 
 from tensorflow.python.framework import dtypes
-from tensorflow.python.framework import ops
+from tensorflow.python.framework import sparse_tensor
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
 
@@ -36,7 +36,7 @@ class Sparsify(transform.TensorFlowTransform):
     super(Sparsify, self).__init__()
     self._strip_value = strip_value
 
-  @transform.parameter
+  @transform._parameter  # pylint: disable=protected-access
   def strip_value(self):
     return self._strip_value
 
@@ -82,4 +82,5 @@ class Sparsify(transform.TensorFlowTransform):
     shape = math_ops.cast(array_ops.shape(d), dtypes.int64)
 
     # pylint: disable=not-callable
-    return self.return_type(ops.SparseTensor(sparse_indices, values, shape))
+    return self.return_type(
+        sparse_tensor.SparseTensor(sparse_indices, values, shape))

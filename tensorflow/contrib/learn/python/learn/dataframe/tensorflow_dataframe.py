@@ -97,7 +97,7 @@ class TensorFlowDataFrame(df.DataFrame):
       graph: the `Graph` in which the `DataFrame` should be built.
       session: the `Session` in which to run the columns of the `DataFrame`.
       start_queues: if true, queues will be started before running and halted
-        after producting `n` batches.
+        after producing `n` batches.
       initialize_variables: if true, variables will be initialized.
       **kwargs: Additional keyword arguments e.g. `num_epochs`.
 
@@ -115,9 +115,9 @@ class TensorFlowDataFrame(df.DataFrame):
       cols = list(self_built.values())
       if initialize_variables:
         if variables.local_variables():
-          session.run(variables.initialize_local_variables())
-        if variables.all_variables():
-          session.run(variables.initialize_all_variables())
+          session.run(variables.local_variables_initializer())
+        if variables.global_variables():
+          session.run(variables.global_variables_initializer())
       if start_queues:
         coord = coordinator.Coordinator()
         threads = qr.start_queue_runners(sess=session, coord=coord)
@@ -690,11 +690,11 @@ class TensorFlowDataFrame(df.DataFrame):
                        shuffle=True,
                        seed=None,
                        data_name="numpy_data"):
-    """Creates a `tf.learn.DataFrame` from a `numpy.ndarray`.
+    """Creates a `tf.learn.DataFrame` from an `OrderedDict` of `numpy.ndarray`.
 
-    The returned `DataFrame` contains two columns: 'index' and 'value'. The
-    'value' column contains a row from the array. The 'index' column contains
-    the corresponding row number.
+    The returned `DataFrame` contains a column for each key of the dict plus an
+    extra 'index' column. The 'index' column contains the row number. Each of
+    the other columns contains a row from the corresponding array.
 
     Args:
       ordered_dict_of_arrays: `OrderedDict` of `numpy.ndarray` that serves as a
@@ -710,8 +710,10 @@ class TensorFlowDataFrame(df.DataFrame):
       data_name: a scope name identifying the data.
 
     Returns:
-      A `tf.learn.DataFrame` that contains batches drawn from the given
-      array.
+      A `tf.learn.DataFrame` that contains batches drawn from the given arrays.
+
+    Raises:
+      ValueError: `ordered_dict_of_arrays` contains the reserved name 'index'.
     """
     numpy_source = in_memory_source.OrderedDictNumpySource(
         ordered_dict_of_arrays,

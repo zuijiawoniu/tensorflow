@@ -20,6 +20,7 @@ limitations under the License.
 #include <vector>
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/cloud/auth_provider.h"
+#include "tensorflow/core/platform/cloud/file_block_cache.h"
 #include "tensorflow/core/platform/cloud/http_request.h"
 #include "tensorflow/core/platform/cloud/retrying_file_system.h"
 #include "tensorflow/core/platform/file_system.h"
@@ -35,7 +36,8 @@ class GcsFileSystem : public FileSystem {
   GcsFileSystem();
   GcsFileSystem(std::unique_ptr<AuthProvider> auth_provider,
                 std::unique_ptr<HttpRequest::Factory> http_request_factory,
-                size_t read_ahead_bytes);
+                size_t block_size, uint32 block_count, uint64 max_staleness,
+                int64 initial_retry_delay_usec);
 
   Status NewRandomAccessFile(
       const string& filename,
@@ -51,11 +53,14 @@ class GcsFileSystem : public FileSystem {
       const string& filename,
       std::unique_ptr<ReadOnlyMemoryRegion>* result) override;
 
-  bool FileExists(const string& fname) override;
+  Status FileExists(const string& fname) override;
 
   Status Stat(const string& fname, FileStatistics* stat) override;
 
   Status GetChildren(const string& dir, std::vector<string>* result) override;
+
+  Status GetMatchingPaths(const string& pattern,
+                          std::vector<string>* results) override;
 
   Status DeleteFile(const string& fname) override;
 
@@ -67,13 +72,74 @@ class GcsFileSystem : public FileSystem {
 
   Status RenameFile(const string& src, const string& target) override;
 
+  Status IsDirectory(const string& fname) override;
+
+  Status DeleteRecursively(const string& dirname, int64* undeleted_files,
+                           int64* undeleted_dirs) override;
+  size_t block_size() const { return block_size_; }
+  uint32 block_count() const { return block_count_; }
+  uint64 max_staleness() const { return max_staleness_; }
+
  private:
+  /// \brief Checks if the bucket exists. Returns OK if the check succeeded.
+  ///
+  /// 'result' is set if the function returns OK. 'result' cannot be nullptr.
+  Status BucketExists(const string& bucket, bool* result);
+
+  /// \brief Checks if the object exists. Returns OK if the check succeeded.
+  ///
+  /// 'result' is set if the function returns OK. 'result' cannot be nullptr.
+  Status ObjectExists(const string& bucket, const string& object, bool* result);
+
+  /// \brief Checks if the folder exists. Returns OK if the check succeeded.
+  ///
+  /// 'result' is set if the function returns OK. 'result' cannot be nullptr.
+  Status FolderExists(const string& dirname, bool* result);
+
+  /// \brief Internal version of GetChildren with more knobs.
+  ///
+  /// If 'recursively' is true, returns all objects in all subfolders.
+  /// Otherwise only returns the immediate children in the directory.
+  ///
+  /// If 'include_self_directory_marker' is true and there is a GCS directory
+  /// marker at the path 'dir', GetChildrenBound will return an empty string
+  /// as one of the children that represents this marker.
+  Status GetChildrenBounded(const string& dir, uint64 max_results,
+                            std::vector<string>* result, bool recursively,
+                            bool include_self_directory_marker);
+  /// Retrieves file statistics assuming fname points to a GCS object.
+  Status StatForObject(const string& bucket, const string& object,
+                       FileStatistics* stat);
+  Status RenameObject(const string& src, const string& target);
+
+  /// Loads file contents from GCS for a given bucket and object.
+  Status LoadBufferFromGCS(const string& bucket, const string& object,
+                           uint64_t offset, size_t n, std::vector<char>* out);
+
   std::unique_ptr<AuthProvider> auth_provider_;
   std::unique_ptr<HttpRequest::Factory> http_request_factory_;
 
-  // The number of bytes to read ahead for buffering purposes in the
-  // RandomAccessFile implementation. Defaults to 256Mb.
-  const size_t read_ahead_bytes_ = 256 * 1024 * 1024;
+  /// Guards access to the file cache.
+  mutex mu_;
+
+  /// Cache from filename to FileBlockCache. Populated iff max_staleness_ > 0.
+  std::map<string, std::shared_ptr<FileBlockCache>> file_cache_ GUARDED_BY(mu_);
+
+  /// The block size for block-aligned reads in the RandomAccessFile
+  /// implementation. Defaults to 256Mb.
+  size_t block_size_ = 256 * 1024 * 1024;
+
+  /// The block count for the LRU cache of blocks in the RandomAccessFile
+  /// implementation.  Defaults to 1.
+  uint32 block_count_ = 1;
+
+  /// The maximum staleness of cached file blocks across close/open boundaries.
+  /// Defaults to 0, meaning that file blocks do not persist across close/open
+  /// boundaries.
+  uint64 max_staleness_ = 0;
+
+  /// The initial delay for exponential backoffs when retrying failed calls.
+  const int64 initial_retry_delay_usec_ = 1000000L;
 
   TF_DISALLOW_COPY_AND_ASSIGN(GcsFileSystem);
 };
